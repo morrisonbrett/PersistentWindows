@@ -10,8 +10,12 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
         /// <summary>
         /// The main entry point for the application.
         /// </summary>
-        static PersistentWindowProcessor pwp;
-        [STAThread]
+        public static readonly string ProjectUrl = "https://github.com/kangyu-california/PersistentWindows";
+
+        static PersistentWindowProcessor pwp = null;    
+        static SystrayForm systrayForm = null;
+
+        //[STAThread]
         static void Main(string[] args)
         {
             bool no_splash = false;
@@ -40,6 +44,8 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 #endif
 
             pwp = new PersistentWindowProcessor();
+            pwp.showRestoreTip = ShowRestoreTip;
+            pwp.hideRestoreTip = HideRestoreTip;
             pwp.Start();
 
             if (!no_splash)
@@ -49,8 +55,19 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            new SystrayForm();
+            systrayForm = new SystrayForm();
             Application.Run();
+        }
+
+        static void ShowRestoreTip()
+        {
+            systrayForm.notifyIconMain.ShowBalloonTip(30000, "", "Please wait while restoring windows", ToolTipIcon.Info);
+        }
+
+        static void HideRestoreTip()
+        {
+            systrayForm.notifyIconMain.Visible = false;
+            systrayForm.notifyIconMain.Visible = true;
         }
 
         static void StartSplashForm()
@@ -78,13 +95,9 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 
         static public void Restore()
         {
+            ShowRestoreTip();
             Thread.Sleep(2000); // let mouse settle still for taskbar restoration
             pwp.BatchRestoreApplicationsOnCurrentDisplays(restoreFromDB : true);
-        }
-
-        static public void Stop()
-        {
-            pwp.Stop();
         }
 
     }

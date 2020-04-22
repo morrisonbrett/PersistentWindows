@@ -1,4 +1,3 @@
-
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -7,12 +6,15 @@ using System.Text;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+
 using Microsoft.Win32;
+
+using LiteDB;
 using ManagedWinapi.Windows;
+
 using Ninjacrab.PersistentWindows.Common.Diagnostics;
 using Ninjacrab.PersistentWindows.Common.Models;
 using Ninjacrab.PersistentWindows.Common.WinApiBridge;
-using LiteDB;
 
 
 namespace Ninjacrab.PersistentWindows.Common
@@ -32,8 +34,8 @@ namespace Ninjacrab.PersistentWindows.Common
         private const int MaxHistoryQueueLength = 20;
 
         // window position database
-        private Dictionary<string, Dictionary<string, Queue<ApplicationDisplayMetrics>>> monitorApplications  //in-memory database
-            = new Dictionary<string, Dictionary<string, Queue<ApplicationDisplayMetrics>>>();
+        private Dictionary<string, Dictionary<IntPtr, Queue<ApplicationDisplayMetrics>>> monitorApplications  //in-memory database
+            = new Dictionary<string, Dictionary<IntPtr, Queue<ApplicationDisplayMetrics>>>();
         private LiteDatabase persistDB; //on-disk database
 
         // control shared by capture and restore
@@ -70,6 +72,10 @@ namespace Ninjacrab.PersistentWindows.Common
         private Dictionary<string, DateTime> sessionEndTime = new Dictionary<string, DateTime>();
 
         // callbacks
+        public delegate void CallBack();
+        public CallBack showRestoreTip;
+        public CallBack hideRestoreTip;
+
         private PowerModeChangedEventHandler powerModeChangedHandler;
         private EventHandler displaySettingsChangingHandler;
         private EventHandler displaySettingsChangedHandler;
@@ -144,6 +150,8 @@ namespace Ninjacrab.PersistentWindows.Common
                     curDisplayMetrics.DbMatchWindow = false;
                     db.Update(curDisplayMetrics);
                 }
+
+                hideRestoreTip();
             });
 
             winEventsCaptureDelegate = WinEventProc;
@@ -300,29 +308,42 @@ namespace Ninjacrab.PersistentWindows.Common
             }
 
             var window = new SystemWindow(hwnd);
-            if (window.Parent.HWnd.ToInt64() != 0 || !window.Visible || string.IsNullOrEmpty(window.Title))
+            if (window.Parent.HWnd.ToInt64() != 0)
             {
-                // only track top level visible windows
+                // only track top level windows
                 return;
             }
 
             if (eventType == User32Events.EVENT_OBJECT_DESTROY)
             {
-                string applicationKey = ApplicationDisplayMetrics.GetKey(hwnd);
+                if (idObject != 0)
+                {
+                    // ignore non-window object (caret etc)
+                    return;
+                }
 
                 lock (databaseLock)
                 {
-                    foreach (var item in monitorApplications)
+                    foreach (var displayKey in monitorApplications.Keys)
                     {
-                        string displayKey = item.Key;
-                        if (monitorApplications[displayKey].ContainsKey(applicationKey))
-                        {
-                            monitorApplications[displayKey].Remove(applicationKey);
-                        }
+                        monitorApplications[displayKey].Remove(hwnd);
                     }
 
                     windowTitle.Remove(hwnd);
                 }
+
+                return;
+            }
+
+            // only track visible windows
+            if (!window.Visible)
+            {
+                return;
+            }
+
+            // auto track taskbar
+            if (string.IsNullOrEmpty(window.Title) && !IsTaskBar(window))
+            {
                 return;
             }
 
@@ -436,10 +457,11 @@ namespace Ninjacrab.PersistentWindows.Common
         private bool CaptureWindow(SystemWindow window, User32Events eventType, DateTime now, string displayKey, bool saveToDB = false)
         {
             bool ret = false;
+            IntPtr hWnd = window.HWnd;
 
             if (!monitorApplications.ContainsKey(displayKey))
             {
-                monitorApplications.Add(displayKey, new Dictionary<string, Queue<ApplicationDisplayMetrics>>());
+                monitorApplications.Add(displayKey, new Dictionary<IntPtr, Queue<ApplicationDisplayMetrics>>());
             }
 
             ApplicationDisplayMetrics curDisplayMetrics = null;
@@ -462,39 +484,39 @@ namespace Ninjacrab.PersistentWindows.Common
                     );
                 Log.Trace(log + log2);
 
-                if (!monitorApplications[displayKey].ContainsKey(curDisplayMetrics.Key))
+                if (!monitorApplications[displayKey].ContainsKey(hWnd))
                 {
-                    monitorApplications[displayKey].Add(curDisplayMetrics.Key, new Queue<ApplicationDisplayMetrics>());
-                    monitorApplications[displayKey][curDisplayMetrics.Key].Enqueue(curDisplayMetrics);
+                    monitorApplications[displayKey].Add(hWnd, new Queue<ApplicationDisplayMetrics>());
+                    monitorApplications[displayKey][hWnd].Enqueue(curDisplayMetrics);
                 }
                 else
                 {
-                    if (monitorApplications[displayKey][curDisplayMetrics.Key].Count == MaxHistoryQueueLength)
+                    if (monitorApplications[displayKey][hWnd].Count == MaxHistoryQueueLength)
                     {
                         // limit length of capture history
-                        monitorApplications[displayKey][curDisplayMetrics.Key].Dequeue();
+                        monitorApplications[displayKey][hWnd].Dequeue();
                     }
-                    monitorApplications[displayKey][curDisplayMetrics.Key].Enqueue(curDisplayMetrics);
+                    monitorApplications[displayKey][hWnd].Enqueue(curDisplayMetrics);
                 }
                 ret = true;
             }
 
-            if (saveToDB && curDisplayMetrics != null && monitorApplications[displayKey].ContainsKey(curDisplayMetrics.Key))
+            if (saveToDB && curDisplayMetrics != null && monitorApplications[displayKey].ContainsKey(hWnd))
             {
                 try
                 {
                     var db = persistDB.GetCollection<ApplicationDisplayMetrics>(displayKey);
+                    windowTitle[hWnd] = curDisplayMetrics.Title;
+                    curDisplayMetrics.ProcessName = window.Process.ProcessName;
+                    curDisplayMetrics.DbMatchWindow = false;
+
                     IntPtr hProcess = Kernel32.OpenProcess(Kernel32.ProcessAccessFlags.QueryInformation, false, curDisplayMetrics.ProcessId);
                     string procPath = GetProcExePath(hProcess);
                     if (!String.IsNullOrEmpty(procPath))
                     {
-                        windowTitle[window.HWnd] = curDisplayMetrics.Title;
-
                         curDisplayMetrics.ProcessExePath = procPath;
-                        curDisplayMetrics.DbMatchWindow = false;
-                        curDisplayMetrics.ProcessName = window.Process.ProcessName;
-                        db.Insert(curDisplayMetrics);
                     }
+                    db.Insert(curDisplayMetrics);
                     Kernel32.CloseHandle(hProcess);
                 }
                 catch (Exception ex)
@@ -630,14 +652,15 @@ namespace Ninjacrab.PersistentWindows.Common
             }
         }
 
-        private void RemoveBatchCaptureTime()
+        private void RemoveBatchCaptureTime(bool force = true)
         {
             lock (controlLock)
             {
-                if (sessionEndTime.ContainsKey(validDisplayKeyForCapture))
+                if (!force && sessionEndTime.ContainsKey(validDisplayKeyForCapture))
                 {
-                    sessionEndTime.Remove(validDisplayKeyForCapture);
+                    return;
                 }
+                sessionEndTime.Remove(validDisplayKeyForCapture);
             }
 
         }
@@ -739,13 +762,13 @@ namespace Ninjacrab.PersistentWindows.Common
             };
 
             bool moved = false;
-            if (!monitorApplications[displayKey].ContainsKey(curDisplayMetrics.Key))
+            if (!monitorApplications[displayKey].ContainsKey(curDisplayMetrics.HWnd))
             {
                 moved = true;
             }
             else
             {
-                ApplicationDisplayMetrics[] captureHistory = monitorApplications[displayKey][curDisplayMetrics.Key].ToArray();
+                ApplicationDisplayMetrics[] captureHistory = monitorApplications[displayKey][curDisplayMetrics.HWnd].ToArray();
                 ApplicationDisplayMetrics prevDisplayMetrics;
                 if (eventType == 0 && restoringWindowPos)
                 {
@@ -769,10 +792,10 @@ namespace Ninjacrab.PersistentWindows.Common
                     {
                         // truncate capture history to filter out OS moves
                         Array.Resize(ref captureHistory, truncateSize);
-                        monitorApplications[displayKey][curDisplayMetrics.Key].Clear();
+                        monitorApplications[displayKey][curDisplayMetrics.HWnd].Clear();
                         foreach (var metrics in captureHistory)
                         {
-                            monitorApplications[displayKey][curDisplayMetrics.Key].Enqueue(metrics);
+                            monitorApplications[displayKey][curDisplayMetrics.HWnd].Enqueue(metrics);
                         }
                     }
                 }
@@ -782,7 +805,7 @@ namespace Ninjacrab.PersistentWindows.Common
                     || prevDisplayMetrics.ClassName != curDisplayMetrics.ClassName)
                 {
                     // key collision between dead window and new window with the same hwnd
-                    monitorApplications[displayKey].Remove(curDisplayMetrics.Key);
+                    monitorApplications[displayKey].Remove(curDisplayMetrics.HWnd);
                     moved = true;
                 }
                 else if (eventType == User32Events.EVENT_SYSTEM_FOREGROUND)
@@ -815,6 +838,11 @@ namespace Ninjacrab.PersistentWindows.Common
 
         public void BatchRestoreApplicationsOnCurrentDisplays(bool restoreFromDB = false)
         {
+            if (!restoreFromDB && restoreTimes == 0)
+            {
+                showRestoreTip();
+            }
+
             lock (controlLock)
             {
                 if (!restoringWindowPos && !restoreFromDB)
@@ -1007,21 +1035,11 @@ namespace Ninjacrab.PersistentWindows.Common
                     continue;
                 }
 
-                /*
-                if (ProcessName.Contains("CodeSetup"))
-                {
-                    // prevent hang in SetWindowPlacement()
-                    continue;
-                }
-                */
-
                 IntPtr hWnd = window.HWnd;
                 uint processId = 0;
                 uint threadId = User32.GetWindowThreadProcessId(hWnd, out processId);
 
-                string applicationKey = ApplicationDisplayMetrics.GetKey(hWnd);
-
-                if (monitorApplications[displayKey].ContainsKey(applicationKey))
+                if (monitorApplications[displayKey].ContainsKey(hWnd))
                 {
                     ApplicationDisplayMetrics curDisplayMetrics = null;
                     if (restoreFromDB)
@@ -1053,7 +1071,7 @@ namespace Ninjacrab.PersistentWindows.Common
                         }
 
                         // update stale window/process id
-                        curDisplayMetrics.HWnd = window.HWnd;
+                        curDisplayMetrics.HWnd = hWnd;
                         curDisplayMetrics.ProcessId = processId;
                         curDisplayMetrics.ProcessName = processName;
                         curDisplayMetrics.DbMatchWindow = true;
@@ -1061,12 +1079,12 @@ namespace Ninjacrab.PersistentWindows.Common
 
                         curDisplayMetrics.CaptureTime = restoreTime;
 
-                        if (monitorApplications[displayKey][curDisplayMetrics.Key].Count == MaxHistoryQueueLength)
+                        if (monitorApplications[displayKey][hWnd].Count == MaxHistoryQueueLength)
                         {
                             // limit length of capture history
-                            monitorApplications[displayKey][curDisplayMetrics.Key].Dequeue();
+                            monitorApplications[displayKey][hWnd].Dequeue();
                         }
-                        monitorApplications[displayKey][curDisplayMetrics.Key].Enqueue(curDisplayMetrics);
+                        monitorApplications[displayKey][hWnd].Enqueue(curDisplayMetrics);
                     }
 
                     if (!IsWindowMoved(displayKey, window, 0, restoreTime, out curDisplayMetrics))
@@ -1075,16 +1093,15 @@ namespace Ninjacrab.PersistentWindows.Common
                         continue;
                     }
 
-                    ApplicationDisplayMetrics[] captureHisotry = monitorApplications[displayKey][applicationKey].ToArray();
+                    ApplicationDisplayMetrics[] captureHisotry = monitorApplications[displayKey][hWnd].ToArray();
                     ApplicationDisplayMetrics prevDisplayMetrics = captureHisotry.Last();
                     RECT2 rect = prevDisplayMetrics.ScreenPosition;
                     WindowPlacement windowPlacement = prevDisplayMetrics.WindowPlacement;
-                    IntPtr hwnd = prevDisplayMetrics.HWnd;
 
                     bool success = true;
                     if (curDisplayMetrics.IsTaskbar)
                     {
-                        MoveTaskBar(hwnd, rect.Left + rect.Width / 2, rect.Top + rect.Height / 2);
+                        MoveTaskBar(hWnd, rect.Left + rect.Width / 2, rect.Top + rect.Height / 2);
                         continue;
                     }
 
@@ -1097,11 +1114,11 @@ namespace Ninjacrab.PersistentWindows.Common
                             // the window thinks it's maximized, but does not eat all the real estate. So we'll temporarily unmaximize then
                             // re-apply that
                             windowPlacement.ShowCmd = ShowWindowCommands.Normal;
-                            User32.SetWindowPlacement(hwnd, ref windowPlacement);
+                            User32.SetWindowPlacement(hWnd, ref windowPlacement);
                             windowPlacement.ShowCmd = ShowWindowCommands.Maximize;
                         }
 
-                        success &= User32.SetWindowPlacement(hwnd, ref windowPlacement);
+                        success &= User32.SetWindowPlacement(hWnd, ref windowPlacement);
                         Log.Info("SetWindowPlacement({0} [{1}x{2}]-[{3}x{4}]) - {5}",
                             window.Process.ProcessName,
                             windowPlacement.NormalPosition.Left,
@@ -1112,7 +1129,7 @@ namespace Ninjacrab.PersistentWindows.Common
                     }
 
                     // recover previous screen position
-                    success &= User32.MoveWindow(hwnd, rect.Left, rect.Top, rect.Width, rect.Height, true);
+                    success &= User32.MoveWindow(hWnd, rect.Left, rect.Top, rect.Width, rect.Height, true);
 
                     Log.Info("MoveWindow({0} [{1}x{2}]-[{3}x{4}]) - {5}",
                         window.Process.ProcessName,
@@ -1156,9 +1173,12 @@ namespace Ninjacrab.PersistentWindows.Common
                         multiwindowProcess[curDisplayMetrics.ProcessName]++;
                     }
 
-                    Log.Trace("launch process {0}", curDisplayMetrics.ProcessExePath);
-                    System.Diagnostics.Process.Start(curDisplayMetrics.ProcessExePath);
-                    Thread.Sleep(1000);
+                    if (!String.IsNullOrEmpty(curDisplayMetrics.ProcessExePath))
+                    {
+                        Log.Trace("launch process {0}", curDisplayMetrics.ProcessExePath);
+                        System.Diagnostics.Process.Start(curDisplayMetrics.ProcessExePath);
+                        Thread.Sleep(1000);
+                    }
                 }
             }
 
@@ -1190,7 +1210,7 @@ namespace Ninjacrab.PersistentWindows.Common
             return pathToExe;
         }
 
-        public void Stop()
+        public void StopRunningThreads()
         {
             //stop running thread of event loop
         }
@@ -1198,6 +1218,8 @@ namespace Ninjacrab.PersistentWindows.Common
 #region IDisposable
         public virtual void Dispose(bool disposing)
         {
+            StopRunningThreads();
+
             SystemEvents.DisplaySettingsChanging -= this.displaySettingsChangingHandler;
             SystemEvents.DisplaySettingsChanged -= this.displaySettingsChangedHandler;
             SystemEvents.PowerModeChanged -= powerModeChangedHandler;
@@ -1207,6 +1229,8 @@ namespace Ninjacrab.PersistentWindows.Common
             {
                 User32.UnhookWinEvent(handle);
             }
+
+            persistDB.Dispose();
         }
 
         public void Dispose()
