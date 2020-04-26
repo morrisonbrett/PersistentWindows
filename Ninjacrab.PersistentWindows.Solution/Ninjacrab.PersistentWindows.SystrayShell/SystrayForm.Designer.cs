@@ -19,7 +19,6 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 
         private System.Windows.Forms.ToolStripMenuItem captureToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem restoreToolStripMenuItem;
-        private System.Windows.Forms.ToolStripMenuItem diagnosticsToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem aboutToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem exitToolStripMenuItem;
         private System.Windows.Forms.ToolStripSeparator[] toolStripMenuItem = new System.Windows.Forms.ToolStripSeparator[3];
@@ -49,7 +48,6 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
             System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(SystrayForm));
             this.notifyIconMain = new System.Windows.Forms.NotifyIcon(this.components);
             this.contextMenuStripSysTray = new System.Windows.Forms.ContextMenuStrip(this.components);
-            this.diagnosticsToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.aboutToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.captureToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.restoreToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
@@ -66,8 +64,12 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
             // notifyIconMain
             // 
             this.notifyIconMain.ContextMenuStrip = this.contextMenuStripSysTray;
-            this.notifyIconMain.Icon = ((System.Drawing.Icon)(resources.GetObject("notifyIconMain.Icon")));
+            //this.notifyIconMain.Icon = ((System.Drawing.Icon)(resources.GetObject("notifyIconMain.Icon")));
+            this.notifyIconMain.Icon = Properties.Resources.pwIcon;
             this.notifyIconMain.Text = $"Persistent Windows {Application.ProductVersion}";
+            this.notifyIconMain.BalloonTipTitle = "";
+            this.notifyIconMain.BalloonTipText = "Please wait while restoring windows";
+            this.notifyIconMain.BalloonTipIcon = ToolTipIcon.Info;
             this.notifyIconMain.Visible = true;
             // 
             // contextMenuStripSysTray
@@ -77,7 +79,6 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
                 this.toolStripMenuItem[0],
                 this.restoreToolStripMenuItem,
                 this.toolStripMenuItem[1],
-                this.diagnosticsToolStripMenuItem,
                 this.aboutToolStripMenuItem,
                 this.toolStripMenuItem[2],
                 this.exitToolStripMenuItem});
@@ -99,13 +100,6 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
             this.restoreToolStripMenuItem.Click += new System.EventHandler(this.RestoreWindowClickHandler);
 
             // 
-            // diagnosticsToolStripMenuItem
-            // 
-            this.diagnosticsToolStripMenuItem.Name = "diagnosticsToolStripMenuItem";
-            this.diagnosticsToolStripMenuItem.Size = new System.Drawing.Size(135, 22);
-            this.diagnosticsToolStripMenuItem.Text = "&Diagnostics";
-            this.diagnosticsToolStripMenuItem.Click += new System.EventHandler(this.DiagnosticsToolStripMenuItemClickHandler);
-            // 
             // aboutToolStripMenuItem
             // 
             this.aboutToolStripMenuItem.Name = "aboutToolStripMenuItem";
@@ -126,7 +120,7 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(284, 261);
-            this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
+            //this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
             this.Name = "SystrayForm";
             this.contextMenuStripSysTray.ResumeLayout(false);
             this.ResumeLayout(false);

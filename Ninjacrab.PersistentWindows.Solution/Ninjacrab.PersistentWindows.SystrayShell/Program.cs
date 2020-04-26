@@ -15,7 +15,7 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
         static PersistentWindowProcessor pwp = null;    
         static SystrayForm systrayForm = null;
 
-        //[STAThread]
+        [STAThread]
         static void Main(string[] args)
         {
             bool no_splash = false;
@@ -61,7 +61,14 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 
         static void ShowRestoreTip()
         {
-            systrayForm.notifyIconMain.ShowBalloonTip(30000, "", "Please wait while restoring windows", ToolTipIcon.Info);
+            var thread = new Thread(() =>
+            {
+                systrayForm.notifyIconMain.Visible = true;
+                systrayForm.notifyIconMain.ShowBalloonTip(30000);
+            });
+
+            thread.IsBackground = false;
+            thread.Start();
         }
 
         static void HideRestoreTip()
@@ -72,20 +79,14 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 
         static void StartSplashForm()
         {
-            var thread = new Thread(() => TimedSplashForm());
+            var thread = new Thread(() =>
+            {
+                Application.Run(new SplashForm());
+            });
             thread.IsBackground = false;
+            thread.Priority = ThreadPriority.Highest;
             thread.Name = "StartSplashForm";
             thread.Start();
-        }
-
-        static void TimedSplashForm()
-        {
-            var thread = new Thread(() => Application.Run(new SplashForm()));
-            thread.IsBackground = false;
-            thread.Name = "TimedSplashForm";
-            thread.Start();
-            Thread.Sleep(5000);
-            thread.Abort();
         }
 
         static public void Capture()
@@ -95,8 +96,6 @@ namespace Ninjacrab.PersistentWindows.SystrayShell
 
         static public void Restore()
         {
-            ShowRestoreTip();
-            Thread.Sleep(2000); // let mouse settle still for taskbar restoration
             pwp.BatchRestoreApplicationsOnCurrentDisplays(restoreFromDB : true);
         }
 
