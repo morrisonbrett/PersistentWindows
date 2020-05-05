@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Diagnostics;
 using System.Reflection;
+//using System.Windows.Forms;
 
 using Microsoft.Win32;
 
@@ -57,7 +58,7 @@ namespace Ninjacrab.PersistentWindows.Common
         private bool restoringWindowPos = false; // about to restore
         private int restoreTimes = 0;
         private int restoreNestLevel = 0; // nested call level
-        private bool nextRestoreFromDb = false;
+        public bool restoreFromDB = false;
         private Dictionary<string, int> multiwindowProcess = new Dictionary<string, int>()
             {
                 // avoid launch process multiple times
@@ -92,8 +93,9 @@ namespace Ninjacrab.PersistentWindows.Common
             ;
         }
 #endif
-        public void Start()
+        public bool Start()
         {
+            string productName = System.Windows.Forms.Application.ProductName;
             string tempFolderPath = Path.GetTempPath();
 #if DEBUG
             tempFolderPath = "."; //avoid db path conflict with release version
@@ -101,7 +103,7 @@ namespace Ninjacrab.PersistentWindows.Common
             // remove outdated db files
             var dir = new DirectoryInfo(tempFolderPath);
             var db_version = Assembly.GetExecutingAssembly().GetName().Version.ToString();
-            foreach (var file in dir.EnumerateFiles($@"{System.Windows.Forms.Application.ProductName}*.db"))
+            foreach (var file in dir.EnumerateFiles($@"{productName}*.db"))
             {
                 var fname = file.Name;
                 if (!fname.Contains(db_version))
@@ -117,7 +119,15 @@ namespace Ninjacrab.PersistentWindows.Common
                 }
             }
 
-            persistDB = new LiteDatabase($@"{tempFolderPath}/{System.Windows.Forms.Application.ProductName}.{db_version}.db");
+            try
+            {
+                persistDB = new LiteDatabase($@"{tempFolderPath}/{productName}.{db_version}.db");
+            }
+            catch (Exception)
+            {
+                System.Windows.Forms.MessageBox.Show($"Only one instance of {productName} can be run!");
+                return false;
+            }
 
             validDisplayKeyForCapture = GetDisplayKey();
             BatchCaptureApplicationsOnCurrentDisplays();
@@ -153,7 +163,7 @@ namespace Ninjacrab.PersistentWindows.Common
             restoreTimer = new Timer(state =>
             {
                 Log.Trace("Restore timer expired");
-                BatchRestoreApplicationsOnCurrentDisplays(nextRestoreFromDb);
+                BatchRestoreApplicationsOnCurrentDisplays();
             });
 
             restoreFinishedTimer = new Timer(state =>
@@ -277,7 +287,7 @@ namespace Ninjacrab.PersistentWindows.Common
                             {
                                 // force restore in case OS does not generate display changed event
                                 restoringWindowPos = true;
-                                StartRestoreTimer(milliSecond: DefaultRestoreLatency);
+                                StartRestoreTimer();
                             }
                             break;
                     }
@@ -299,7 +309,7 @@ namespace Ninjacrab.PersistentWindows.Common
                         sessionLocked = false;
                         // force restore in case OS does not generate display changed event
                         restoringWindowPos = true;
-                        StartRestoreTimer(milliSecond: DefaultRestoreLatency);
+                        StartRestoreTimer();
                         break;
 
                     case SessionSwitchReason.RemoteDisconnect:
@@ -319,6 +329,8 @@ namespace Ninjacrab.PersistentWindows.Common
             };
 
             SystemEvents.SessionSwitch += sessionSwitchEventHandler;
+
+            return true;
         }
 
         private void WinEventProc(IntPtr hWinEventHook, User32Events eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
@@ -424,13 +436,24 @@ namespace Ninjacrab.PersistentWindows.Common
                         case User32Events.EVENT_OBJECT_LOCATIONCHANGE:
                             lock (controlLock)
                             {
-                                // can not tell if this event is caused by user snap operation or OS initiated closing session
-                                // wait for other user move events until capture timer expires
-                                if (pendingCaptureWindows.Count == 0)
+                                if (restoreFromDB)
                                 {
-                                    StartCaptureTimer();
+                                    if (restoreTimes >= MinRestoreTimes)
+                                    {
+                                        // a new window move is initiated by OS instead of user during restore, restart restore timer
+                                        StartRestoreTimer();
+                                    }
                                 }
-                                pendingCaptureWindows.Add(hwnd);
+                                else
+                                {
+                                    // can not tell if this event is caused by user snap operation or OS initiated closing session
+                                    // wait for other user move events until capture timer expires
+                                    if (pendingCaptureWindows.Count == 0)
+                                    {
+                                        StartCaptureTimer();
+                                    }
+                                    pendingCaptureWindows.Add(hwnd);
+                                }
                             }
                             break;
 
@@ -455,7 +478,10 @@ namespace Ninjacrab.PersistentWindows.Common
                                         CaptureWindow(window, eventType, now, displayKey);
                                         if (eventType != User32Events.EVENT_SYSTEM_FOREGROUND)
                                         {
-                                            RemoveBatchCaptureTime();
+                                            if (!restoreFromDB)
+                                            {
+                                                RemoveBatchCaptureTime();
+                                            }
                                         }
                                     }
                                 }
@@ -566,9 +592,8 @@ namespace Ninjacrab.PersistentWindows.Common
             captureTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
-        private void StartRestoreTimer(int milliSecond = RestoreLatency, bool wait = false, bool restoreFromDb = false)
+        private void StartRestoreTimer(int milliSecond = RestoreLatency, bool wait = false)
         {
-            nextRestoreFromDb = restoreFromDb;
             restoreTimer.Change(milliSecond, Timeout.Infinite);
             if (wait)
             {
@@ -581,12 +606,12 @@ namespace Ninjacrab.PersistentWindows.Common
             restoreTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
-        private void StartRestoreFinishedTimer(int milliSecond)
+        private void StartRestoreFinishedTimer(int milliSecond = DefaultRestoreLatency)
         {
             restoreFinishedTimer.Change(milliSecond, Timeout.Infinite);
         }
 
-        private void CancelRestoreFinishedTimer(int milliSecond)
+        private void CancelRestoreFinishedTimer()
         {
             restoreFinishedTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
@@ -637,7 +662,7 @@ namespace Ninjacrab.PersistentWindows.Common
                 CancelRestoreTimer();
                 restoreTimes = 0;
                 restoreNestLevel = 0;
-                nextRestoreFromDb = false;
+                restoreFromDB = false;
 
                 // reset counter of multiwindowProcess
                 var keys = new List<string>();
@@ -857,12 +882,11 @@ namespace Ninjacrab.PersistentWindows.Common
             return moved;
         }
 
-        public void BatchRestoreApplicationsOnCurrentDisplays(bool restoreFromDB = false)
+        public void BatchRestoreApplicationsOnCurrentDisplays()
         {
             if (restoreTimes == 0)
             {
                 showRestoreTip();
-
                 if (restoreFromDB)
                 {
                     Thread.Sleep(2000); // let mouse settle still for taskbar restoration
@@ -876,10 +900,11 @@ namespace Ninjacrab.PersistentWindows.Common
                     return;
                 }
 
-                if (restoreNestLevel > 1)
+                if (restoreNestLevel > 0)
                 {
                     // avoid overloading CPU due to too many restore threads ready to run
                     Log.Trace("restore busy");
+                    StartRestoreTimer();
                     return;
                 }
                 restoreNestLevel++;
@@ -891,20 +916,20 @@ namespace Ninjacrab.PersistentWindows.Common
                 {
                     lock (databaseLock)
                     {
-                        CancelRestoreFinishedTimer(MaxRestoreLatency);
+                        CancelRestoreFinishedTimer();
                         if (restoreTimes < (remoteSession ? MaxRestoreTimesRemote : MaxRestoreTimesLocal))
                         {
                             validDisplayKeyForCapture = GetDisplayKey();
-                            RestoreApplicationsOnCurrentDisplays(validDisplayKeyForCapture, restoreFromDB);
+                            RestoreApplicationsOnCurrentDisplays(validDisplayKeyForCapture);
                             restoreTimes++;
 
                             // schedule finish restore
-                            StartRestoreFinishedTimer(MaxRestoreLatency);
+                            StartRestoreFinishedTimer(milliSecond : MaxRestoreLatency);
 
                             // force next restore, as Windows OS might not send expected message during restore
                             if (restoreTimes < MinRestoreTimes)
                             {
-                                StartRestoreTimer(restoreFromDb: restoreFromDB);
+                                StartRestoreTimer();
                             }
                         }
                         else
@@ -952,42 +977,62 @@ namespace Ninjacrab.PersistentWindows.Common
 
             RECT2 screenPosition = new RECT2();
             IntPtr hReBar = User32.FindWindowEx(hwnd, IntPtr.Zero, "ReBarWindow32", null);
-            User32.GetWindowRect(hReBar, ref screenPosition);
-            int dx;
-            int dy;
-            if (screenPosition.Width > screenPosition.Height)
-            {
-                //horizontal
-                dx = 1;
-                dy = screenPosition.Height / 2;
-            }
-            else
-            {
-                dx = screenPosition.Width / 2;
-                dy = 1;
-            }
+            //User32.GetWindowRect(hReBar, ref screenPosition);
 
             IntPtr hTaskBar = User32.FindWindowEx(hReBar, IntPtr.Zero, "MSTaskSwWClass", null);
             hTaskBar = User32.FindWindowEx(hTaskBar, IntPtr.Zero, "MSTaskListWClass", null);
             User32.GetWindowRect(hTaskBar, ref screenPosition);
 
-            // avoid unnecessary move
-            double x_ratio = Math.Abs(screenPosition.Left + dx - x) / x;
-            double y_ratio = Math.Abs(screenPosition.Top + dy - y) / y;
-            if (x_ratio < 0.5 && y_ratio < 0.5)
+            // try place cursor to head and then tail of taskbar to guarantee move success
+            int dx;
+            int dy;
+            if (screenPosition.Width > screenPosition.Height)
             {
+                switch (restoreTimes)
+                {
+                    case 1:
+                        dx = screenPosition.Width - restoreTimes * 10;
+                        break;
+                    default:
+                        dx = 1;
+                        break;
+                }
+                dy = screenPosition.Height / 2;
+            }
+            else
+            {
+                dx = screenPosition.Width / 2;
+                switch (restoreTimes)
+                {
+                    case 1:
+                        dy = screenPosition.Height - restoreTimes * 10;
+                        break;
+                    default:
+                        dy = 1;
+                        break;
+                }
+            }
+
+            // avoid unnecessary move
+            int centerx = screenPosition.Left + screenPosition.Width / 2;
+            int centery = screenPosition.Top + screenPosition.Height / 2;
+            int deltax = Math.Abs(centerx - x);
+            int deltay = Math.Abs(centery - y);
+            if (deltax + deltay < 300)
+            {
+                // taskbar center has no change
                 return;
             }
 
             User32.SetCursorPos(screenPosition.Left + dx, screenPosition.Top + dy);
-            User32.SetForegroundWindow(hwnd);
-            User32.SetActiveWindow(hwnd);
-            Thread.Sleep(1000); // wait to be activated
-            User32.SetForegroundWindow(hTaskBar);
+            //User32.SetForegroundWindow(hwnd);
+            //User32.SetActiveWindow(hwnd);
+            //Thread.Sleep(1000); // wait to be activated
+            //User32.SetForegroundWindow(hTaskBar);
             User32.SetActiveWindow(hTaskBar);
             User32.mouse_event(MouseAction.MOUSEEVENTF_LEFTDOWN,
                 0, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(2500); // wait to be activated
+            Thread.Sleep(3500); // wait to be activated
             User32.SetCursorPos(x, y);
             User32.mouse_event(MouseAction.MOUSEEVENTF_LEFTUP,
                 0, 0, 0, UIntPtr.Zero);
@@ -1008,7 +1053,7 @@ namespace Ninjacrab.PersistentWindows.Common
             return null;
         }
 
-        private bool RestoreApplicationsOnCurrentDisplays(string displayKey, bool restoreFromDB = false, SystemWindow sWindow = null)
+        private bool RestoreApplicationsOnCurrentDisplays(string displayKey, SystemWindow sWindow = null)
         {
             bool succeed = false;
 
@@ -1129,7 +1174,6 @@ namespace Ninjacrab.PersistentWindows.Common
                 ApplicationDisplayMetrics curDisplayMetrics = null;
                 if (!IsWindowMoved(displayKey, window, 0, restoreTime, out curDisplayMetrics))
                 {
-                    // window position has no change
                     continue;
                 }
 
@@ -1138,13 +1182,13 @@ namespace Ninjacrab.PersistentWindows.Common
                 RECT2 rect = prevDisplayMetrics.ScreenPosition;
                 WindowPlacement windowPlacement = prevDisplayMetrics.WindowPlacement;
 
-                bool success = true;
                 if (IsTaskBar(window))
                 {
                     MoveTaskBar(hWnd, rect.Left + rect.Width / 2, rect.Top + rect.Height / 2);
                     continue;
                 }
 
+                bool success = true;
                 if (restoreTimes >= MinRestoreTimes || curDisplayMetrics.NeedUpdateWindowPlacement)
                 {
                     // recover NormalPosition (the workspace position prior to snap)
@@ -1169,7 +1213,7 @@ namespace Ninjacrab.PersistentWindows.Common
                 }
 
                 // recover previous screen position
-                success &= User32.MoveWindow(hWnd, rect.Left, rect.Top, rect.Width, rect.Height, true);
+                success &= User32.MoveWindow(hWnd, rect.Left, rect.Top, rect.Width, rect.Height, false);
 
                 Log.Info("MoveWindow({0} [{1}x{2}]-[{3}x{4}]) - {5}",
                     window.Process.ProcessName,
@@ -1186,6 +1230,8 @@ namespace Ninjacrab.PersistentWindows.Common
                     Log.Error(error);
                 }
             }
+
+            User32.RedrawWindow(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, User32.RedrawWindowFlags.Invalidate);
 
             Log.Trace("Restored windows position for display setting {0}", displayKey);
 
